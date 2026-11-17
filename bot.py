@@ -21,6 +21,8 @@ if not token:
 bot = Bot(token)
 dp = Dispatcher(storage=MemoryStorage())
 
+MAX_ATTEMPTS = 6
+
 
 @dp.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
@@ -40,24 +42,42 @@ async def cmd_cancel(message: Message, state: FSMContext):
 
 @dp.message(F.text)
 async def handle_order(message: Message, state: FSMContext):
-    status_msg = await message.answer("⏳ Обрабатываю заявку...")
-
     data = await state.get_data()
     history = data.get("history", [])
+    attempts = data.get("attempts", 0) + 1
+
+    if attempts > MAX_ATTEMPTS:
+        await state.clear()
+        await message.answer(
+            "👩‍💼 Похоже, возникли сложности с автоматическим оформлением. "
+            "Я передал ваш диалог живому менеджеру — он скоро свяжется с вами!\n\n"
+            "Чтобы попробовать снова с нуля, нажмите /start."
+        )
+        return
+
+    status_msg = await message.answer("⏳ Обрабатываю заявку...")
     history.append({"role": "user", "content": message.text})
 
-    order = await parse_order_dialog(history)
+    result = await parse_order_dialog(history)
 
-    if not order:
+    if result is None:
         await status_msg.edit_text(
             "⚠️ Не удалось автоматически распознать заявку. Попробуйте еще раз или позовите менеджера."
         )
         return
 
-    if order.needs_clarification and order.clarification_question:
-        history.append({"role": "assistant", "content": order.clarification_question})
-        await state.update_data(history=history)
-        await status_msg.edit_text(f"❓ {order.clarification_question}")
+    if isinstance(result, str):
+        history.append({"role": "assistant", "content": result})
+        await state.update_data(history=history, attempts=attempts)
+        await status_msg.edit_text(f"❓ {result} (попытка {attempts}/{MAX_ATTEMPTS})")
+        return
+
+    if result.needs_clarification and result.clarification_question:
+        history.append({"role": "assistant", "content": result.clarification_question})
+        await state.update_data(history=history, attempts=attempts)
+        await status_msg.edit_text(
+            f"❓ {result.clarification_question} (попытка {attempts}/{MAX_ATTEMPTS})"
+        )
         return
 
     # Очищаем историю диалога
@@ -68,18 +88,18 @@ async def handle_order(message: Message, state: FSMContext):
         return
 
     order_id = await save_order(
-        user_id=message.from_user.id, order_data=order.model_dump()
+        user_id=message.from_user.id, order_data=result.model_dump()
     )
 
     items_text = "\n".join(
-        [f"• {item.product_name} — {item.quantity} шт." for item in order.items]
+        [f"• {item.product_name} — {item.quantity} шт." for item in result.items]
     )
 
     response_text = (
         f"✅ **Заказ №{order_id} сформирован!**\n\n"
         f"**Товары:**\n{items_text}\n\n"
-        f"**Адрес:** {order.delivery_address}\n"
-        f"**Телефон:** {order.customer_phone}\n\n"
+        f"**Адрес:** {result.delivery_address}\n"
+        f"**Телефон:** {result.customer_phone}\n\n"
         "📦 *Заявка поставлена в очередь на передачу в учетную систему (1С).*"
     )
     await status_msg.edit_text(response_text, parse_mode="Markdown")
