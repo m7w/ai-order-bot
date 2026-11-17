@@ -1,8 +1,10 @@
 import asyncio
 import logging
 import os
+import socket
 
 from aiogram import Bot, Dispatcher, F
+from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -14,6 +16,9 @@ from database import init_db, save_order  # Импортируем функци�
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
+
+session = AiohttpSession()
+session._connector_init = {"family": socket.AF_INET}
 
 token = os.getenv("BOT_TOKEN")
 if not token:
