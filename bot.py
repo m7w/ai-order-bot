@@ -7,8 +7,14 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import Message
+from aiogram.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+)
 from dotenv import load_dotenv
 
 from ai_parser import parse_order_dialog
@@ -27,6 +33,12 @@ bot = Bot(token)
 dp = Dispatcher(storage=MemoryStorage())
 
 MAX_ATTEMPTS = 6
+MAX_INPUT_CHARS = 500
+
+
+class OrderState(StatesGroup):
+    waiting_for_confirmation = State()
+    waiting_for_edit = State()
 
 
 @dp.message(CommandStart())
@@ -47,6 +59,7 @@ async def cmd_cancel(message: Message, state: FSMContext):
 
 @dp.message(F.text)
 async def handle_order(message: Message, state: FSMContext):
+    current_state = await state.get_state()
     data = await state.get_data()
     history = data.get("history", [])
     attempts = data.get("attempts", 0) + 1
@@ -60,8 +73,17 @@ async def handle_order(message: Message, state: FSMContext):
         )
         return
 
+    # Если пользователь находился в состоянии подтверждения или редактирования и прислал текст
+    if current_state in (
+        OrderState.waiting_for_confirmation.state,
+        OrderState.waiting_for_edit.state,
+    ):
+        await state.set_state(None)
+
     status_msg = await message.answer("⏳ Обрабатываю заявку...")
-    history.append({"role": "user", "content": message.text})
+
+    content = message.text[:MAX_INPUT_CHARS] if message.text else None
+    history.append({"role": "user", "content": content})
 
     result = await parse_order_dialog(history)
 
@@ -85,29 +107,83 @@ async def handle_order(message: Message, state: FSMContext):
         )
         return
 
-    # Очищаем историю диалога
-    await state.clear()
-
-    # Сохраняем готовый заказ в SQLite и получаем его реальный номер
-    if message.from_user is None:
-        return
-
-    order_id = await save_order(
-        user_id=message.from_user.id, order_data=result.model_dump()
-    )
+    # Заказ собран, просим подтверждение у пользователя
+    order_data = result.model_dump()
+    await state.update_data(order_data=order_data, history=history, attempts=attempts)
+    await state.set_state(OrderState.waiting_for_confirmation)
 
     items_text = "\n".join(
         [f"• {item.product_name} — {item.quantity} шт." for item in result.items]
     )
 
-    response_text = (
-        f"✅ **Заказ №{order_id} сформирован!**\n\n"
+    summary_text = (
+        f"📋 **Проверьте данные вашего заказа:**\n\n"
         f"**Товары:**\n{items_text}\n\n"
         f"**Адрес:** {result.delivery_address}\n"
         f"**Телефон:** {result.customer_phone}\n\n"
+        "Всё указано верно?"
+    )
+
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Все верно, оформить", callback_data="confirm_order"
+                ),
+                InlineKeyboardButton(
+                    text="Изменить данные", callback_data="edit_order"
+                ),
+            ]
+        ]
+    )
+
+    await status_msg.edit_text(
+        summary_text, parse_mode="Markdown", reply_markup=keyboard
+    )
+
+
+@dp.callback_query(F.data == "confirm_order", OrderState.waiting_for_confirmation)
+async def process_confirm(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    order_data = data.get("order_data")
+    if not order_data:
+        await callback.answer(
+            "Данные заказа не найдены. Начните сначала /start", show_alert=True
+        )
+        await state.clear()
+        return
+
+    if callback.from_user is None:
+        return
+
+    order_id = await save_order(user_id=callback.from_user.id, order_data=order_data)
+
+    items_text = "\n".join(
+        [
+            f"• {item['product_name']} — {item['quantity']} шт."
+            for item in order_data["items"]
+        ]
+    )
+
+    response_text = (
+        f"✅ **Заказ №{order_id} сформирован!**\n\n"
+        f"**Товары:**\n{items_text}\n\n"
+        f"**Адрес:** {order_data['delivery_address']}\n"
+        f"**Телефон:** {order_data['customer_phone']}\n\n"
         "📦 *Заявка поставлена в очередь на передачу в учетную систему (1С).*"
     )
-    await status_msg.edit_text(response_text, parse_mode="Markdown")
+    await callback.message.edit_text(response_text, parse_mode="Markdown")
+    await state.clear()
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "edit_order", OrderState.waiting_for_confirmation)
+async def process_edit(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(OrderState.waiting_for_edit)
+    await callback.message.edit_text(
+        "Напишите, что именно нужно изменить (например: адрес, телефон или количество товаров)."
+    )
+    await callback.answer()
 
 
 async def main():
