@@ -24,7 +24,9 @@ class OrderItem(BaseModel):
 
 class CustomerOrder(BaseModel):
     items: list[OrderItem] = Field(description="Список заказанных товаров")
-    delivery_address: str | None = Field(description="Адрес доставки, если указан")
+    delivery_address: str | None = Field(
+        description="Адрес доставки (гороод, улица, дом), если указан"
+    )
     customer_phone: str | None = Field(
         description="Контактный телефон клиента, если указан"
     )
@@ -51,7 +53,7 @@ SYSTEM_PROMPT = """
 Ты — ассистент отдела продаж. Твоя задача — извлечь структурированный заказ из диалога с клиентом.
 Для оформления заказа обязательны:
 1. Хотя бы один товар с количеством (от 1 до 999).
-2. Адрес доставки.
+2. Адрес доставки (город, улица, дом).
 3. Корректный номер телефона (от 9 до 15 цифр).
 
 Правила безопасности и валидации:
